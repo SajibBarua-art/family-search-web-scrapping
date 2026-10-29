@@ -13,16 +13,42 @@ from config import DB_PATH
 logger = logging.getLogger(__name__)
 
 
-def generate_query_signature(qp: str, lat: float | str, lng: float | str, radius: int | float | str) -> str:
+def generate_query_signature(
+    qp: str,
+    lat: Optional[float | str] = None,
+    lng: Optional[float | str] = None,
+    radius: Optional[int | float | str] = None,
+) -> str:
     """
     Generate a normalized, deterministic query signature for caching.
-    Format: normalized_qp|lat_6f|lng_6f|radius_int
+    - If lat & lng are provided: normalized_qp|lat_6f|lng_6f|radius_int
+    - If only qp is provided: normalized_qp (or normalized_qp|radius=int if radius given)
     """
     normalized_qp = " ".join((str(qp) or "").strip().lower().split())
-    lat_val = f"{float(lat):.6f}"
-    lng_val = f"{float(lng):.6f}"
-    radius_val = str(int(round(float(radius))))
-    return f"{normalized_qp}|{lat_val}|{lng_val}|{radius_val}"
+    has_coords = False
+    lat_f, lng_f = 0.0, 0.0
+    try:
+        if lat is not None and lng is not None and str(lat).strip() and str(lng).strip():
+            lat_f = float(lat)
+            lng_f = float(lng)
+            has_coords = True
+    except (ValueError, TypeError):
+        has_coords = False
+
+    radius_val = ""
+    try:
+        if radius is not None and str(radius).strip() and str(radius).lower() not in ("nan", "none"):
+            radius_val = str(int(round(float(radius))))
+    except (ValueError, TypeError):
+        radius_val = ""
+
+    if has_coords:
+        r_str = radius_val or "50"
+        return f"{normalized_qp}|{lat_f:.6f}|{lng_f:.6f}|{r_str}"
+        
+    if radius_val:
+        return f"{normalized_qp}|radius={radius_val}"
+    return normalized_qp
 
 
 async def init_db(db_path: Path = DB_PATH) -> None:

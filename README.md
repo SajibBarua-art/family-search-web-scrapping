@@ -68,11 +68,47 @@ This project is built to handle geographic search queries against the FamilySear
 
 ## End-to-End Step-by-Step Example
 
-Let's trace a concrete row from [`input_queries.csv`](file:///home/sajibbarua/myProject/family-search-web-scrapping/input_queries.csv):
+You can provide an input file in either **Excel format (`.xlsx`, `.xls`)** or **CSV format (`.csv`)**.
+
+### Scenario A: Providing ONLY `qp` (Place Name) via an Excel File
+You can provide an Excel file [`input_queries.xlsx`](file:///home/sajibbarua/myProject/family-search-web-scrapping/input_queries.xlsx) with just a single column for the place name:
+
+| qp |
+| :--- |
+| Albuquerque, New Mexico, United States |
+| Salt Lake City, Utah, United States |
+| Denver, Colorado, United States |
+
+*(Note: Column header names are flexible — `qp`, `Query Place`, `Place`, `Location`, `Address`, or `City` are all automatically recognized, and single-column Excel files are detected automatically).*
+
+#### How `qp`-Only Search Works:
+1. **Signature**: Generates `albuquerque, new mexico, united states`.
+2. **Cache Check**: Queries SQLite for this normalized place signature.
+3. **API Query**: Direct REST API queries Yext Search using `input="Albuquerque, New Mexico, United States"`. The Yext backend automatically performs geographic NLP parsing and geocoding, returning the 25 matching locations without requiring manual latitude/longitude input!
+4. **Relational Storage**: Stores the query and all 25 child location records into SQLite.
+5. **Excel Report**: Generates a timestamped `.xlsx` report in `reports/`.
+
+---
+
+### Scenario B: Providing Full Coordinates (`qp, lat, lng, r`) via CSV/Excel
+If you already possess exact bounding coordinates, you can supply `lat`, `lng`, and radius `r` (in miles):
 
 ```csv
 qp,lat,lng,r
 "Albuquerque, New Mexico, United States",35.088192,-106.650945,50
+```
+
+When `lat` and `lng` are present, the scraper applies the precise spatial `$near` bounding circle filter:
+```json
+{
+  "builtin.location": {
+    "$near": {
+      "lat": 35.088192,
+      "lng": -106.650945,
+      "radius": 80467
+    }
+  }
+}
 ```
 
 ### Step 1: Input Parsing & Signature Generation

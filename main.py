@@ -8,7 +8,7 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import aiosqlite
 import pandas as pd
 
@@ -38,28 +38,85 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def load_input_queries(csv_path: Path) -> List[Dict[str, Any]]:
-    """
-    Load and validate input search queries from CSV file.
-    Expected columns: qp, lat, lng, r
-    """
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Input file not found at: {csv_path}")
+def resolve_column_name(columns: List[str], candidate_names: List[str]) -> Optional[str]:
+    """Find the first column matching any candidate name case-insensitively."""
+    col_map = {str(c).strip().lower(): c for c in columns}
+    for candidate in candidate_names:
+        cand_lower = candidate.strip().lower()
+        if cand_lower in col_map:
+            return col_map[cand_lower]
+    return None
 
-    df = pd.read_csv(csv_path)
-    required_cols = {"qp", "lat", "lng", "r"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"Input CSV is missing required columns: {missing}")
+
+def load_input_queries(file_path: Path) -> List[Dict[str, Any]]:
+    """
+    Load and validate input search queries from an Excel (.xlsx, .xls) or CSV file.
+    Supports queries with ONLY 'qp' (place name) as well as full 'qp, lat, lng, r'.
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"Input file not found at: {file_path}")
+
+    # Load from Excel or CSV based on file extension
+    suffix = file_path.suffix.lower()
+    if suffix in (".xlsx", ".xls"):
+        df = pd.read_excel(file_path)
+    else:
+        df = pd.read_csv(file_path)
+
+    if df.empty:
+        logging.warning("Input file is empty: %s", file_path)
+        return []
+
+    columns = [str(c) for c in df.columns]
+
+    # Flexible detection of 'qp' column (e.g. qp, query_place, place, search_query, location, address)
+    qp_candidates = ["qp", "query_place", "place", "search_query", "query", "location", "address", "city"]
+    qp_col = resolve_column_name(columns, qp_candidates)
+
+    if not qp_col:
+        # If single column or first column contains text, use it as qp
+        if len(columns) == 1:
+            qp_col = columns[0]
+        else:
+            raise ValueError(
+                f"Could not identify a query place column in {columns}. "
+                f"Expected one of: {qp_candidates}"
+            )
+
+    # Optional coordinate & radius columns
+    lat_col = resolve_column_name(columns, ["lat", "latitude"])
+    lng_col = resolve_column_name(columns, ["lng", "lon", "long", "longitude"])
+    radius_col = resolve_column_name(columns, ["r", "radius", "search_radius"])
 
     queries: List[Dict[str, Any]] = []
     for idx, row in df.iterrows():
         try:
-            qp = str(row["qp"]).strip()
-            lat = float(row["lat"])
-            lng = float(row["lng"])
-            radius = int(round(float(row["r"])))
-            
+            qp_val = row[qp_col]
+            if pd.isna(qp_val) or not str(qp_val).strip():
+                continue
+            qp = str(qp_val).strip()
+
+            lat = None
+            if lat_col and not pd.isna(row[lat_col]):
+                try:
+                    lat = float(row[lat_col])
+                except (ValueError, TypeError):
+                    lat = None
+
+            lng = None
+            if lng_col and not pd.isna(row[lng_col]):
+                try:
+                    lng = float(row[lng_col])
+                except (ValueError, TypeError):
+                    lng = None
+
+            radius = None
+            if radius_col and not pd.isna(row[radius_col]):
+                try:
+                    radius = int(round(float(row[radius_col])))
+                except (ValueError, TypeError):
+                    radius = None
+
             signature = generate_query_signature(qp, lat, lng, radius)
             queries.append({
                 "row_index": idx + 1,
@@ -136,7 +193,11 @@ async def process_batch(
             radius = q_item["radius"]
             sig = q_item["query_signature"]
 
-            logger.info("FETCHING: '%s' (lat=%.6f, lng=%.6f, r=%d)", qp, lat, lng, radius)
+            if lat is not None and lng is not None:
+                logger.info("FETCHING: '%s' (lat=%.6f, lng=%.6f, r=%s)", qp, lat, lng, radius or 50)
+            else:
+                logger.info("FETCHING: '%s' (place query only)", qp)
+
             try:
                 locations = await client.fetch_locations(
                     qp=qp,
@@ -279,12 +340,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Production FamilySearch Locations Scraper, SQLite Cache & Excel Reporter."
     )
+    default_input = Path("input_queries.xlsx") if Path("input_queries.xlsx").exists() else Path("input_queries.csv")
     parser.add_argument(
         "--input",
         "-i",
         type=Path,
-        default=Path("input_queries.csv"),
-        help="Path to input queries CSV file (default: input_queries.csv)",
+        default=default_input,
+        help=f"Path to input queries Excel (.xlsx, .xls) or CSV file (default: {default_input})",
     )
     parser.add_argument(
         "--batch-size",

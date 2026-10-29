@@ -215,40 +215,62 @@ class FamilySearchClient:
 
     async def _execute_direct_request(
         self,
-        lat: float,
-        lng: float,
-        radius_miles: int,
+        qp: str,
+        lat: Optional[float | str] = None,
+        lng: Optional[float | str] = None,
+        radius_miles: Optional[int | float | str] = None,
         limit: int = 50,
     ) -> Dict[str, Any]:
         """
         Execute an HTTP request to the Yext vertical query API with tenacity retries.
+        - If lat & lng are supplied: applies spatial $near location filter.
+        - If lat & lng are omitted: queries using input=qp.
         """
         client = await self.get_http_client()
-        radius_meters = int(round(radius_miles * 1609.344))
         
-        # Spatial $near filter matching frontend locator format
-        filters_dict = {
-            "builtin.location": {
-                "$near": {
-                    "lat": float(lat),
-                    "lng": float(lng),
-                    "radius": radius_meters,
-                }
-            }
-        }
-        
-        params = {
+        params: Dict[str, str] = {
             "experienceKey": EXPERIENCE_KEY,
             "api_key": self.api_key,
             "v": API_VERSION,
             "version": EXPERIENCE_VERSION,
             "locale": DEFAULT_LOCALE,
             "verticalKey": VERTICAL_KEY,
-            "filters": json.dumps(filters_dict),
             "limit": str(limit),
             "retrieveFacets": "true",
             "skipSpellCheck": "true",
         }
+        
+        has_coords = False
+        lat_f, lng_f = 0.0, 0.0
+        try:
+            if lat is not None and lng is not None and str(lat).strip() and str(lng).strip():
+                lat_f = float(lat)
+                lng_f = float(lng)
+                has_coords = True
+        except (ValueError, TypeError):
+            has_coords = False
+
+        radius_val = 50
+        try:
+            if radius_miles is not None and str(radius_miles).strip() and str(radius_miles).lower() not in ("nan", "none"):
+                radius_val = int(round(float(radius_miles)))
+        except (ValueError, TypeError):
+            radius_val = 50
+
+        if has_coords:
+            radius_meters = int(round(radius_val * 1609.344))
+            filters_dict = {
+                "builtin.location": {
+                    "$near": {
+                        "lat": lat_f,
+                        "lng": lng_f,
+                        "radius": radius_meters,
+                    }
+                }
+            }
+            params["filters"] = json.dumps(filters_dict)
+        else:
+            params["input"] = qp
         
         @retry(
             reraise=True,
@@ -268,9 +290,9 @@ class FamilySearchClient:
     async def query_direct_api(
         self,
         qp: str,
-        lat: float,
-        lng: float,
-        radius: int,
+        lat: Optional[float | str] = None,
+        lng: Optional[float | str] = None,
+        radius: Optional[int | float | str] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """
@@ -278,29 +300,26 @@ class FamilySearchClient:
         Queries Yext locator endpoint and parses returned locations.
         """
         try:
-            data = await self._execute_direct_request(lat, lng, radius, limit=limit)
+            data = await self._execute_direct_request(qp=qp, lat=lat, lng=lng, radius_miles=radius, limit=limit)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (401, 403):
                 logger.warning("Received HTTP %d; refreshing API key...", e.response.status_code)
                 await self.auto_discover_credentials()
-                data = await self._execute_direct_request(lat, lng, radius, limit=limit)
+                data = await self._execute_direct_request(qp=qp, lat=lat, lng=lng, radius_miles=radius, limit=limit)
             else:
                 raise
                 
         raw_results = data.get("response", {}).get("results", [])
         locations = [self._parse_location_item(r) for r in raw_results]
-        logger.debug(
-            "Direct API for '%s' (lat=%f, lng=%f, r=%d) returned %d locations",
-            qp, lat, lng, radius, len(locations)
-        )
+        logger.debug("Direct API for '%s' returned %d locations", qp, len(locations))
         return locations
 
     async def query_playwright_interception(
         self,
         qp: str,
-        lat: float,
-        lng: float,
-        radius: int,
+        lat: Optional[float | str] = None,
+        lng: Optional[float | str] = None,
+        radius: Optional[int | float | str] = None,
         timeout_ms: int = 25000,
     ) -> List[Dict[str, Any]]:
         """
@@ -311,13 +330,27 @@ class FamilySearchClient:
         """
         from playwright.async_api import async_playwright
         
-        target_url = (
-            f"{SEARCH_PAGE_URL}?"
-            f"qp={quote_plus(qp)}&"
-            f"lat={lat}&"
-            f"lng={lng}&"
-            f"r={radius}"
-        )
+        has_coords = False
+        try:
+            if lat is not None and lng is not None and str(lat).strip() and str(lng).strip():
+                lat_f = float(lat)
+                lng_f = float(lng)
+                has_coords = True
+        except (ValueError, TypeError):
+            has_coords = False
+
+        if has_coords:
+            r_val = radius or 50
+            target_url = (
+                f"{SEARCH_PAGE_URL}?"
+                f"qp={quote_plus(qp)}&"
+                f"lat={lat_f}&"
+                f"lng={lng_f}&"
+                f"r={r_val}"
+            )
+        else:
+            target_url = f"{SEARCH_PAGE_URL}?qp={quote_plus(qp)}"
+            
         logger.info("Opening Playwright session for: %s", target_url)
         
         captured_data: Optional[Dict[str, Any]] = None
@@ -361,9 +394,9 @@ class FamilySearchClient:
     async def fetch_locations(
         self,
         qp: str,
-        lat: float,
-        lng: float,
-        radius: int,
+        lat: Optional[float | str] = None,
+        lng: Optional[float | str] = None,
+        radius: Optional[int | float | str] = None,
         force_playwright: bool = False,
     ) -> List[Dict[str, Any]]:
         """
